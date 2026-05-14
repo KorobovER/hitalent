@@ -78,6 +78,9 @@ def update_department(department_id: int, body: DepartmentUpdate, db: Session = 
     if not dept:
         raise HTTPException(status_code=404, detail="Подразделение не найдено")
 
+    if not body.model_fields_set:
+        return dept
+
     if "name" in body.model_fields_set:
         if body.name is None:
             raise HTTPException(status_code=422, detail="name не может быть null")
