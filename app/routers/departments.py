@@ -113,6 +113,46 @@ def get_department(
     return _build_node(dept, 1, depth, include_employees, sort_by, db)
 
 
+@router.delete("/{department_id}", status_code=204)
+def delete_department(
+    department_id: int,
+    mode: Literal["cascade", "reassign"] = Query(),
+    reassign_to_department_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    dept = db.get(Department, department_id)
+    if not dept:
+        raise HTTPException(status_code=404, detail="Подразделение не найдено")
+
+    if mode == "reassign":
+        if reassign_to_department_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="reassign_to_department_id обязателен при mode=reassign",
+            )
+        if reassign_to_department_id == department_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Нельзя перевести сотрудников в удаляемое подразделение",
+            )
+        target = db.get(Department, reassign_to_department_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Целевое подразделение не найдено")
+
+        db.query(Employee).filter(Employee.department_id == department_id).update(
+            {"department_id": reassign_to_department_id}
+        )
+        db.query(Department).filter(Department.parent_id == department_id).update(
+            {"parent_id": dept.parent_id}
+        )
+        db.delete(dept)
+
+    else:
+        db.delete(dept)
+
+    db.commit()
+
+
 @router.post("/{department_id}/employees/", response_model=EmployeeResponse, status_code=201)
 def create_employee(department_id: int, body: EmployeeCreate, db: Session = Depends(get_db)):
     department = db.get(Department, department_id)
