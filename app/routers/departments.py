@@ -9,23 +9,10 @@ from app.models.department import Department
 from app.models.employee import Employee
 from app.schemas.department import DepartmentCreate, DepartmentUpdate, DepartmentResponse, DepartmentDetail
 from app.schemas.employee import EmployeeCreate, EmployeeResponse
+from app.services.department_service import check_name_unique, would_create_cycle, build_department_node
 
 router = APIRouter(prefix="/departments", tags=["departments"])
 logger = logging.getLogger(__name__)
-
-
-def _check_name_unique(name: str, parent_id: int | None, db: Session, exclude_id: int | None = None) -> None:
-    query = db.query(Department).filter(
-        Department.name == name,
-        Department.parent_id == parent_id,
-    )
-    if exclude_id is not None:
-        query = query.filter(Department.id != exclude_id)
-    if query.first():
-        raise HTTPException(
-            status_code=409,
-            detail="Подразделение с таким именем уже существует в этом родительском подразделении",
-        )
 
 
 @router.post(
@@ -44,7 +31,7 @@ def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
         if not parent:
             raise HTTPException(status_code=404, detail="Родительское подразделение не найдено")
 
-    _check_name_unique(body.name, body.parent_id, db)
+    check_name_unique(body.name, body.parent_id, db)
 
     department = Department(name=body.name, parent_id=body.parent_id)
     db.add(department)
@@ -52,16 +39,6 @@ def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
     db.refresh(department)
     logger.info("Создано подразделение id=%d name=%r parent_id=%s", department.id, department.name, department.parent_id)
     return department
-
-
-def _would_create_cycle(dept_id: int, new_parent_id: int, db: Session) -> bool:
-    current_id: int | None = new_parent_id
-    while current_id is not None:
-        if current_id == dept_id:
-            return True
-        parent = db.get(Department, current_id)
-        current_id = parent.parent_id if parent else None
-    return False
 
 
 @router.patch(
@@ -92,14 +69,14 @@ def update_department(department_id: int, body: DepartmentUpdate, db: Session = 
         parent = db.get(Department, new_parent_id)
         if not parent:
             raise HTTPException(status_code=404, detail="Родительское подразделение не найдено")
-        if _would_create_cycle(department_id, new_parent_id, db):
+        if would_create_cycle(department_id, new_parent_id, db):
             raise HTTPException(status_code=409, detail="Операция создаёт цикл в дереве подразделений")
 
     final_name = body.name if "name" in body.model_fields_set else dept.name
     final_parent_id = body.parent_id if "parent_id" in body.model_fields_set else dept.parent_id
 
     if "name" in body.model_fields_set or "parent_id" in body.model_fields_set:
-        _check_name_unique(final_name, final_parent_id, db, exclude_id=department_id)
+        check_name_unique(final_name, final_parent_id, db, exclude_id=department_id)
 
     dept.name = final_name
     dept.parent_id = final_parent_id
@@ -108,42 +85,6 @@ def update_department(department_id: int, body: DepartmentUpdate, db: Session = 
     db.refresh(dept)
     logger.info("Обновлено подразделение id=%d name=%r parent_id=%s", dept.id, dept.name, dept.parent_id)
     return dept
-
-
-def _build_node(
-    dept: Department,
-    current_depth: int,
-    max_depth: int,
-    include_employees: bool,
-    sort_by: str,
-    db: Session,
-) -> dict:
-    employees = []
-    if include_employees:
-        order_col = Employee.full_name if sort_by == "full_name" else Employee.created_at
-        employees = (
-            db.query(Employee)
-            .filter(Employee.department_id == dept.id)
-            .order_by(order_col)
-            .all()
-        )
-
-    children = []
-    if current_depth < max_depth:
-        child_depts = db.query(Department).filter(Department.parent_id == dept.id).all()
-        children = [
-            _build_node(c, current_depth + 1, max_depth, include_employees, sort_by, db)
-            for c in child_depts
-        ]
-
-    return {
-        "id": dept.id,
-        "name": dept.name,
-        "parent_id": dept.parent_id,
-        "created_at": dept.created_at,
-        "employees": employees,
-        "children": children,
-    }
 
 
 @router.get(
@@ -163,7 +104,7 @@ def get_department(
     if not dept:
         raise HTTPException(status_code=404, detail="Подразделение не найдено")
 
-    return _build_node(dept, 0, depth, include_employees, sort_by, db)
+    return build_department_node(dept, 0, depth, include_employees, sort_by, db)
 
 
 @router.delete(
