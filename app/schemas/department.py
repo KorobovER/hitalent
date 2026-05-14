@@ -17,6 +17,18 @@ class DepartmentCreate(BaseModel):
         return v
 
 
+class DepartmentUpdate(BaseModel):
+    name: str | None = None
+    parent_id: int | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_not_empty(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("Имя нужно заполнить")
+        return v
+
+
 class DepartmentResponse(BaseModel):
     id: int
     name: str

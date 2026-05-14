@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.department import Department
 from app.models.employee import Employee
-from app.schemas.department import DepartmentCreate, DepartmentResponse, DepartmentDetail
+from app.schemas.department import DepartmentCreate, DepartmentUpdate, DepartmentResponse, DepartmentDetail
 from app.schemas.employee import EmployeeCreate, EmployeeResponse
 
 router = APIRouter(prefix="/departments", tags=["departments"])
@@ -24,6 +24,42 @@ def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(department)
     return department
+
+
+def _would_create_cycle(dept_id: int, new_parent_id: int, db: Session) -> bool:
+    current_id: int | None = new_parent_id
+    while current_id is not None:
+        if current_id == dept_id:
+            return True
+        parent = db.get(Department, current_id)
+        current_id = parent.parent_id if parent else None
+    return False
+
+
+@router.patch("/{department_id}", response_model=DepartmentResponse)
+def update_department(department_id: int, body: DepartmentUpdate, db: Session = Depends(get_db)):
+    dept = db.get(Department, department_id)
+    if not dept:
+        raise HTTPException(status_code=404, detail="Подразделение не найдено")
+
+    if "name" in body.model_fields_set:
+        dept.name = body.name
+
+    if "parent_id" in body.model_fields_set:
+        new_parent_id = body.parent_id
+        if new_parent_id is not None:
+            if new_parent_id == department_id:
+                raise HTTPException(status_code=400, detail="Подразделение не может быть родителем самого себя")
+            parent = db.get(Department, new_parent_id)
+            if not parent:
+                raise HTTPException(status_code=404, detail="Родительское подразделение не найдено")
+            if _would_create_cycle(department_id, new_parent_id, db):
+                raise HTTPException(status_code=400, detail="Операция создаёт цикл в дереве подразделений")
+        dept.parent_id = new_parent_id
+
+    db.commit()
+    db.refresh(dept)
+    return dept
 
 
 def _build_node(
