@@ -1,1 +1,1 @@
-print("Hello World")
+from app.main import app
