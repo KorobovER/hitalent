@@ -1,3 +1,4 @@
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +11,7 @@ from app.schemas.department import DepartmentCreate, DepartmentUpdate, Departmen
 from app.schemas.employee import EmployeeCreate, EmployeeResponse
 
 router = APIRouter(prefix="/departments", tags=["departments"])
+logger = logging.getLogger(__name__)
 
 
 def _check_name_unique(name: str, parent_id: int | None, db: Session, exclude_id: int | None = None) -> None:
@@ -26,7 +28,16 @@ def _check_name_unique(name: str, parent_id: int | None, db: Session, exclude_id
         )
 
 
-@router.post("/", response_model=DepartmentResponse, status_code=201)
+@router.post(
+    "/",
+    response_model=DepartmentResponse,
+    status_code=201,
+    summary="Создать подразделение",
+    responses={
+        404: {"description": "Родительское подразделение не найдено"},
+        409: {"description": "Название уже занято в данном родителе"},
+    },
+)
 def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
     if body.parent_id is not None:
         parent = db.get(Department, body.parent_id)
@@ -39,6 +50,7 @@ def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
     db.add(department)
     db.commit()
     db.refresh(department)
+    logger.info("Создано подразделение id=%d name=%r parent_id=%s", department.id, department.name, department.parent_id)
     return department
 
 
@@ -52,7 +64,15 @@ def _would_create_cycle(dept_id: int, new_parent_id: int, db: Session) -> bool:
     return False
 
 
-@router.patch("/{department_id}", response_model=DepartmentResponse)
+@router.patch(
+    "/{department_id}",
+    response_model=DepartmentResponse,
+    summary="Переименовать или переместить подразделение",
+    responses={
+        404: {"description": "Подразделение или родитель не найдены"},
+        409: {"description": "Конфликт: дубль имени, self-parent или цикл"},
+    },
+)
 def update_department(department_id: int, body: DepartmentUpdate, db: Session = Depends(get_db)):
     dept = db.get(Department, department_id)
     if not dept:
@@ -83,6 +103,7 @@ def update_department(department_id: int, body: DepartmentUpdate, db: Session = 
 
     db.commit()
     db.refresh(dept)
+    logger.info("Обновлено подразделение id=%d name=%r parent_id=%s", dept.id, dept.name, dept.parent_id)
     return dept
 
 
@@ -122,26 +143,39 @@ def _build_node(
     }
 
 
-@router.get("/{department_id}", response_model=DepartmentDetail)
+@router.get(
+    "/{department_id}",
+    response_model=DepartmentDetail,
+    summary="Получить подразделение с сотрудниками и поддеревом",
+    responses={404: {"description": "Подразделение не найдено"}},
+)
 def get_department(
     department_id: int,
-    depth: int = Query(default=1, ge=1, le=5),
-    include_employees: bool = Query(default=True),
-    sort_by: Literal["full_name", "created_at"] = Query(default="full_name"),
+    depth: int = Query(default=1, ge=1, le=5, description="Глубина вложенных подразделений (1–5)"),
+    include_employees: bool = Query(default=True, description="Включить список сотрудников"),
+    sort_by: Literal["full_name", "created_at"] = Query(default="full_name", description="Сортировка сотрудников"),
     db: Session = Depends(get_db),
 ):
     dept = db.get(Department, department_id)
     if not dept:
         raise HTTPException(status_code=404, detail="Подразделение не найдено")
 
-    return _build_node(dept, 1, depth, include_employees, sort_by, db)
+    return _build_node(dept, 0, depth, include_employees, sort_by, db)
 
 
-@router.delete("/{department_id}", status_code=204)
+@router.delete(
+    "/{department_id}",
+    status_code=204,
+    summary="Удалить подразделение",
+    responses={
+        404: {"description": "Подразделение не найдено"},
+        422: {"description": "reassign_to_department_id обязателен при mode=reassign"},
+    },
+)
 def delete_department(
     department_id: int,
-    mode: Literal["cascade", "reassign"] = Query(),
-    reassign_to_department_id: int | None = Query(default=None),
+    mode: Literal["cascade", "reassign"] = Query(description="cascade — удалить всё дерево; reassign — перевести сотрудников"),
+    reassign_to_department_id: int | None = Query(default=None, description="Обязателен при mode=reassign"),
     db: Session = Depends(get_db),
 ):
     dept = db.get(Department, department_id)
@@ -170,14 +204,22 @@ def delete_department(
             {"parent_id": dept.parent_id}
         )
         db.delete(dept)
+        logger.info("Удалено подразделение id=%d (reassign → %d)", department_id, reassign_to_department_id)
 
     else:
         db.delete(dept)
+        logger.info("Удалено подразделение id=%d (cascade)", department_id)
 
     db.commit()
 
 
-@router.post("/{department_id}/employees/", response_model=EmployeeResponse, status_code=201)
+@router.post(
+    "/{department_id}/employees/",
+    response_model=EmployeeResponse,
+    status_code=201,
+    summary="Добавить сотрудника в подразделение",
+    responses={404: {"description": "Подразделение не найдено"}},
+)
 def create_employee(department_id: int, body: EmployeeCreate, db: Session = Depends(get_db)):
     department = db.get(Department, department_id)
     if not department:
@@ -192,4 +234,5 @@ def create_employee(department_id: int, body: EmployeeCreate, db: Session = Depe
     db.add(employee)
     db.commit()
     db.refresh(employee)
+    logger.info("Создан сотрудник id=%d full_name=%r department_id=%d", employee.id, employee.full_name, department_id)
     return employee
