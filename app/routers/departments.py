@@ -12,12 +12,28 @@ from app.schemas.employee import EmployeeCreate, EmployeeResponse
 router = APIRouter(prefix="/departments", tags=["departments"])
 
 
+def _check_name_unique(name: str, parent_id: int | None, db: Session, exclude_id: int | None = None) -> None:
+    query = db.query(Department).filter(
+        Department.name == name,
+        Department.parent_id == parent_id,
+    )
+    if exclude_id is not None:
+        query = query.filter(Department.id != exclude_id)
+    if query.first():
+        raise HTTPException(
+            status_code=409,
+            detail="Подразделение с таким именем уже существует в этом родительском подразделении",
+        )
+
+
 @router.post("/", response_model=DepartmentResponse, status_code=201)
 def create_department(body: DepartmentCreate, db: Session = Depends(get_db)):
     if body.parent_id is not None:
         parent = db.get(Department, body.parent_id)
         if not parent:
             raise HTTPException(status_code=404, detail="Родительское подразделение не найдено")
+
+    _check_name_unique(body.name, body.parent_id, db)
 
     department = Department(name=body.name, parent_id=body.parent_id)
     db.add(department)
@@ -43,19 +59,27 @@ def update_department(department_id: int, body: DepartmentUpdate, db: Session = 
         raise HTTPException(status_code=404, detail="Подразделение не найдено")
 
     if "name" in body.model_fields_set:
-        dept.name = body.name
+        if body.name is None:
+            raise HTTPException(status_code=422, detail="name не может быть null")
 
-    if "parent_id" in body.model_fields_set:
+    if "parent_id" in body.model_fields_set and body.parent_id is not None:
         new_parent_id = body.parent_id
-        if new_parent_id is not None:
-            if new_parent_id == department_id:
-                raise HTTPException(status_code=400, detail="Подразделение не может быть родителем самого себя")
-            parent = db.get(Department, new_parent_id)
-            if not parent:
-                raise HTTPException(status_code=404, detail="Родительское подразделение не найдено")
-            if _would_create_cycle(department_id, new_parent_id, db):
-                raise HTTPException(status_code=400, detail="Операция создаёт цикл в дереве подразделений")
-        dept.parent_id = new_parent_id
+        if new_parent_id == department_id:
+            raise HTTPException(status_code=409, detail="Подразделение не может быть родителем самого себя")
+        parent = db.get(Department, new_parent_id)
+        if not parent:
+            raise HTTPException(status_code=404, detail="Родительское подразделение не найдено")
+        if _would_create_cycle(department_id, new_parent_id, db):
+            raise HTTPException(status_code=409, detail="Операция создаёт цикл в дереве подразделений")
+
+    final_name = body.name if "name" in body.model_fields_set else dept.name
+    final_parent_id = body.parent_id if "parent_id" in body.model_fields_set else dept.parent_id
+
+    if "name" in body.model_fields_set or "parent_id" in body.model_fields_set:
+        _check_name_unique(final_name, final_parent_id, db, exclude_id=department_id)
+
+    dept.name = final_name
+    dept.parent_id = final_parent_id
 
     db.commit()
     db.refresh(dept)
